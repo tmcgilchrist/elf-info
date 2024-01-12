@@ -8,16 +8,17 @@
  * any later version. See LICENSE file for more information.                  *
  ******************************************************************************/
 
-use std::collections::HashMap;
+use anyhow::{anyhow, Context, Result};
 use byteorder::ReadBytesExt;
-use gimli::{BaseAddresses, CallFrameInstruction, CieOrFde,
-            CommonInformationEntry, EhFrame, FrameDescriptionEntry,
-            LittleEndian, Reader, Register, SectionBaseAddresses, UnwindSection,
-            X86_64};
+use gimli::{
+    BaseAddresses, CallFrameInstruction, CieOrFde, CommonInformationEntry, EhFrame,
+    FrameDescriptionEntry, LittleEndian, PowerPc64, Reader, Register, SectionBaseAddresses,
+    UnwindSection,
+};
 use goblin::container::Container;
 use goblin::elf::Elf;
 use rustc_demangle::demangle;
-use anyhow::{anyhow, Context, Result};
+use std::collections::HashMap;
 
 use crate::args::EhArgs;
 use crate::elf::find_symbol;
@@ -27,23 +28,21 @@ use crate::sym::addr_to_sym;
 
 pub fn eh(elf: &Elf, bytes: &[u8], mut opts: EhArgs) -> Result<()> {
     let sh = if let Some(ref name) = opts.section {
-        find_section(elf, name)
-            .ok_or_else(|| anyhow!("couldn't find section {name:?}"))?
+        find_section(elf, name).ok_or_else(|| anyhow!("couldn't find section {name:?}"))?
     } else {
         find_section(elf, ".eh_frame")
             .or_else(|| find_section(elf, ".debug_frame"))
             .ok_or_else(|| anyhow!("couldn't find section `.eh_frame` or `.debug_frame`"))?
     };
 
-    let range = sh.file_range()
+    let range = sh
+        .file_range()
         .ok_or_else(|| anyhow!("section has no content"))?;
 
     if let Some(ref sym) = opts.symbol {
         let sym = find_symbol(&elf.syms, &elf.strtab, sym)
             .or_else(|| find_symbol(&elf.dynsyms, &elf.dynstrtab, sym))
-            .ok_or_else(||
-                anyhow!("couldn't find any symbol matching {:?}", sym)
-            )?;
+            .ok_or_else(|| anyhow!("couldn't find any symbol matching {:?}", sym))?;
         opts.address = Some(sym.st_value);
     }
 
@@ -52,12 +51,7 @@ pub fn eh(elf: &Elf, bytes: &[u8], mut opts: EhArgs) -> Result<()> {
     Ok(())
 }
 
-pub fn eh_frame(
-    elf: &Elf,
-    vaddr: u64,
-    content: &[u8],
-    opts: &EhArgs,
-) -> Result<()> {
+pub fn eh_frame(elf: &Elf, vaddr: u64, content: &[u8], opts: &EhArgs) -> Result<()> {
     let container = elf.header.container().unwrap_or(Container::Big);
     let sp = SizePrint::new(container);
     let eh = EhFrame::new(content, LittleEndian); // TODO: endianness
@@ -81,8 +75,10 @@ pub fn eh_frame(
     };
     let mut entries = eh.entries(&base_addrs);
 
-    while let Some(entry) = entries.next()
-        .with_context(|| anyhow!("failed to parse entry"))? {
+    while let Some(entry) = entries
+        .next()
+        .with_context(|| anyhow!("failed to parse entry"))?
+    {
         match entry {
             CieOrFde::Cie(cie) => {
                 print_cie_header(&cie, sp);
@@ -93,11 +89,11 @@ pub fn eh_frame(
                     instr_ctx.print(instr);
                 }
                 cies.insert(cie.offset(), cie);
-            },
+            }
             CieOrFde::Fde(fde_unparsed) => {
-                let fde = fde_unparsed.parse(|_, _, offset| {
-                    Ok(cies[&offset.0].clone())
-                }).unwrap();
+                let fde = fde_unparsed
+                    .parse(|_, _, offset| Ok(cies[&offset.0].clone()))
+                    .unwrap();
                 if let Some(addr) = opts.address {
                     if !fde.contains(addr) {
                         continue;
@@ -110,21 +106,21 @@ pub fn eh_frame(
                     print!("│  │  ├──⮞ ");
                     instr_ctx.print(instr);
                 }
-            },
+            }
         }
     }
 
     Ok(())
 }
 
-fn print_cie_header<R: Reader<Offset = usize>>(
-    cie: &CommonInformationEntry<R>,
-    sp: SizePrint
-) {
+fn print_cie_header<R: Reader<Offset = usize>>(cie: &CommonInformationEntry<R>, sp: SizePrint) {
     let table = PairTable(20);
 
     println!("│");
-    println!("├╴ \x1b[97mCIE\x1b[0m  offset={}", sp.hex(cie.offset() as u64));
+    println!(
+        "├╴ \x1b[97mCIE\x1b[0m  offset={}",
+        sp.hex(cie.offset() as u64)
+    );
     print!("│  ├╴");
     table.field("Version");
     println!("{}", cie.version());
@@ -147,14 +143,14 @@ fn print_cie_header<R: Reader<Offset = usize>>(
 
     print!("│  ├╴");
     table.field("Return addr register");
-    println!("{} (%{})", cie.return_address_register().0,
-             register_name(cie.return_address_register()));
+    println!(
+        "{} (%{})",
+        cie.return_address_register().0,
+        register_name(cie.return_address_register())
+    );
 }
 
-fn print_fde_header<R: Reader<Offset = usize>>(
-    fde: &FrameDescriptionEntry<R, usize>,
-    elf: &Elf,
-) {
+fn print_fde_header<R: Reader<Offset = usize>>(fde: &FrameDescriptionEntry<R, usize>, elf: &Elf) {
     let container = elf.header.container().unwrap_or(Container::Big);
     let sp = SizePrint::new(container);
     let table = PairTable(10);
@@ -162,7 +158,8 @@ fn print_fde_header<R: Reader<Offset = usize>>(
     println!("│  │");
     println!(
         "│  ├╴ \x1b[97mFDE\x1b[0m  offset={}  CIE={}",
-        sp.hex(fde.offset() as u64), sp.hex(fde.cie().offset() as u64)
+        sp.hex(fde.offset() as u64),
+        sp.hex(fde.cie().offset() as u64)
     );
     print!("│  │  ├╴");
     table.field("PC range");
@@ -199,7 +196,7 @@ impl EhInstrContext {
                     "{:30} loc = {address}",
                     format!("DW_CFA_set_loc({address})")
                 );
-            },
+            }
             AdvanceLoc { delta } => {
                 self.loc += delta as u64;
                 println!(
@@ -207,7 +204,7 @@ impl EhInstrContext {
                     format!("DW_CFA_advance_loc({delta})"),
                     self.sp.hex(self.loc),
                 );
-            },
+            }
             DefCfa { register, offset } => {
                 println!(
                     "{:30} cfa = %{} + {offset}",
@@ -216,20 +213,22 @@ impl EhInstrContext {
                 );
                 self.cfa_reg = register;
                 self.cfa_off = offset;
-            },
-            DefCfaSf { register, factored_offset } => {
-                println!(
-                    "DW_CFA_def_cfa_sf({}, {factored_offset})", register.0
-                );
-            },
+            }
+            DefCfaSf {
+                register,
+                factored_offset,
+            } => {
+                println!("DW_CFA_def_cfa_sf({}, {factored_offset})", register.0);
+            }
             DefCfaRegister { register } => {
                 println!(
                     "{:30} cfa = %{} + \x1b[90m{}\x1b[0m",
                     format!("DW_CFA_def_cfa_register({})", register.0),
-                    register_name(register), self.cfa_off,
+                    register_name(register),
+                    self.cfa_off,
                 );
                 self.cfa_reg = register;
-            },
+            }
             DefCfaOffset { offset } => {
                 println!(
                     "{:30} cfa = \x1b[90m%{}\x1b[0m + {offset}",
@@ -237,28 +236,34 @@ impl EhInstrContext {
                     register_name(self.cfa_reg),
                 );
                 self.cfa_off = offset;
-            },
+            }
             DefCfaOffsetSf { factored_offset } => {
                 println!("DW_CFA_def_cfa_offset_sf({factored_offset})");
-            },
+            }
             DefCfaExpression { expression } => {
-                println!("DW_CFA_def_cfa_expression({:02x?})", expression.0.to_slice().unwrap());
-            },
+                println!(
+                    "DW_CFA_def_cfa_expression({:02x?})",
+                    expression.0.to_slice().unwrap()
+                );
+            }
             Undefined { register } => {
                 println!(
                     "{:30} %{} @ ??? (unrecoverable)",
                     format!("DW_CFA_undefined({})", register.0),
                     register_name(register),
                 );
-            },
+            }
             SameValue { register } => {
                 println!(
                     "{:30} %{} untouched",
                     format!("DW_CFA_same_value({})", register.0),
                     register_name(register),
                 );
-            },
-            Offset { register, factored_offset } => {
+            }
+            Offset {
+                register,
+                factored_offset,
+            } => {
                 let off = factored_offset as i64 * self.data_align;
                 println!(
                     "{:30} %{} @ cfa {} {}",
@@ -267,53 +272,73 @@ impl EhInstrContext {
                     if off < 0 { "−" } else { "+" },
                     off.abs(),
                 );
-            },
-            OffsetExtendedSf { register, factored_offset } => {
+            }
+            OffsetExtendedSf {
+                register,
+                factored_offset,
+            } => {
                 println!(
-                    "DW_CFA_offset_extended_sf({}, {factored_offset})", register.0
+                    "DW_CFA_offset_extended_sf({}, {factored_offset})",
+                    register.0
                 );
-            },
-            ValOffset { register, factored_offset } => {
-                println!(
-                    "DW_CFA_val_offset({}, {factored_offset})", register.0
-                );
-            },
-            ValOffsetSf { register, factored_offset } => {
-                println!(
-                    "DW_CFA_val_offset_sf({}, {factored_offset})", register.0
-                );
-            },
-            Register { dest_register, src_register } => {
+            }
+            ValOffset {
+                register,
+                factored_offset,
+            } => {
+                println!("DW_CFA_val_offset({}, {factored_offset})", register.0);
+            }
+            ValOffsetSf {
+                register,
+                factored_offset,
+            } => {
+                println!("DW_CFA_val_offset_sf({}, {factored_offset})", register.0);
+            }
+            Register {
+                dest_register,
+                src_register,
+            } => {
                 println!(
                     "{:30} %{} = %{}",
                     format!("DW_CFA_register({}, {})", dest_register.0, src_register.0),
-                    register_name(dest_register), register_name(src_register),
+                    register_name(dest_register),
+                    register_name(src_register),
                 );
-            },
-            Expression { register, expression } => {
+            }
+            Expression {
+                register,
+                expression,
+            } => {
                 println!(
                     "DW_CFA_expression({}, {:02x?})\t\t%{} = ...",
-                    register.0, expression.0.to_slice().unwrap(),
+                    register.0,
+                    expression.0.to_slice().unwrap(),
                     register_name(register),
                 );
-            },
-            ValExpression { register, expression } => {
+            }
+            ValExpression {
+                register,
+                expression,
+            } => {
                 println!(
                     "DW_CFA_val_expression({}, {:02x?})",
-                    register.0, expression.0.to_slice().unwrap(),
+                    register.0,
+                    expression.0.to_slice().unwrap(),
                 );
-            },
+            }
             Restore { register } => {
                 println!(
                     "{:30} %{} @ (initial rule)",
                     format!("DW_CFA_restore({})", register.0),
                     register_name(register),
                 );
-            },
+            }
             RememberState => println!("DW_CFA_remember_state()"),
             RestoreState => println!("DW_CFA_restore_state()"),
             ArgsSize { size } => println!("DW_CFA_GNU_args_size({size})"),
+            NegateRaState => println!("DW_CFA_AARCH64_negate_ra_state()"),
             Nop => println!("\x1b[90mDW_CFA_nop()\x1b[0m"),
+            _ => todo!(),
         }
     }
 }
@@ -344,15 +369,24 @@ pub fn eh_frame_hdr(elf: &Elf, pc: u64, content: &[u8]) {
         Value::Signed(n) => print!("{n}"),
         Value::Unsigned(n) => print!("{n}"),
     }
-    println!("  (-> {})", sp.hex(value_abs(content[1], val, pc + off as u64, pc)));
+    println!(
+        "  (-> {})",
+        sp.hex(value_abs(content[1], val, pc + off as u64, pc))
+    );
     off += size;
 
     table.field("Nr entries");
     let (size, val) = value(content[2], &content[off..]);
     let nr_entries;
     match val {
-        Value::Signed(n) => { nr_entries = n as usize; println!("{n}"); },
-        Value::Unsigned(n) => { nr_entries = n as usize; println!("{n}"); },
+        Value::Signed(n) => {
+            nr_entries = n as usize;
+            println!("{n}");
+        }
+        Value::Unsigned(n) => {
+            nr_entries = n as usize;
+            println!("{n}");
+        }
     }
     off += size;
 
@@ -370,11 +404,17 @@ pub fn eh_frame_hdr(elf: &Elf, pc: u64, content: &[u8]) {
         off += size;
         print!(")\x1b[0m");
 
-        print!("  {}", sp.hex(value_abs(content[3], val, pc + off as u64, pc)));
+        print!(
+            "  {}",
+            sp.hex(value_abs(content[3], val, pc + off as u64, pc))
+        );
         print!("  ->  ");
 
         let (size, val) = value(content[3], &content[off..]);
-        print!("{}  ", sp.hex(value_abs(content[3], val, pc + off as u64, pc)));
+        print!(
+            "{}  ",
+            sp.hex(value_abs(content[3], val, pc + off as u64, pc))
+        );
         print!("\x1b[90m(");
         match val {
             Value::Signed(n) => print!("{n:10}"),
@@ -420,12 +460,24 @@ fn value(enc: u8, mut d: &[u8]) -> (usize, Value) {
 
     match enc & 0x0f {
         0x01 => unimplemented!("unsigned LEB128"), // TODO: implement
-        0x02 => (2, Value::Unsigned(d.read_u16::<LittleEndian>().unwrap() as u64)),
-        0x03 => (4, Value::Unsigned(d.read_u32::<LittleEndian>().unwrap() as u64)),
+        0x02 => (
+            2,
+            Value::Unsigned(d.read_u16::<LittleEndian>().unwrap() as u64),
+        ),
+        0x03 => (
+            4,
+            Value::Unsigned(d.read_u32::<LittleEndian>().unwrap() as u64),
+        ),
         0x04 => (8, Value::Unsigned(d.read_u64::<LittleEndian>().unwrap())),
         0x09 => unimplemented!("signed LEB128"), // TODO: implement
-        0x0a => (2, Value::Signed(d.read_i16::<LittleEndian>().unwrap() as i64)),
-        0x0b => (4, Value::Signed(d.read_i32::<LittleEndian>().unwrap() as i64)),
+        0x0a => (
+            2,
+            Value::Signed(d.read_i16::<LittleEndian>().unwrap() as i64),
+        ),
+        0x0b => (
+            4,
+            Value::Signed(d.read_i32::<LittleEndian>().unwrap() as i64),
+        ),
         0x0c => (8, Value::Signed(d.read_i64::<LittleEndian>().unwrap())),
         _ => panic!("invalid encoding"), // TODO: don't panic
     }
@@ -452,5 +504,5 @@ enum Value {
 }
 
 fn register_name(r: Register) -> &'static str {
-    X86_64::register_name(r).unwrap_or("???") // TODO: handle other archs
+    PowerPc64::register_name(r).unwrap_or("???") // TODO: handle other archs
 }
