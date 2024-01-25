@@ -12,8 +12,7 @@ use anyhow::{anyhow, Context, Result};
 use byteorder::ReadBytesExt;
 use gimli::{
     BaseAddresses, CallFrameInstruction, CieOrFde, CommonInformationEntry, EhFrame,
-    FrameDescriptionEntry, LittleEndian, PowerPc64, Reader, Register, SectionBaseAddresses,
-    UnwindSection,
+    FrameDescriptionEntry, PowerPc64, Reader, Register, SectionBaseAddresses, UnwindSection,
 };
 use goblin::container::Container;
 use goblin::elf::Elf;
@@ -54,7 +53,12 @@ pub fn eh(elf: &Elf, bytes: &[u8], mut opts: EhArgs) -> Result<()> {
 pub fn eh_frame(elf: &Elf, vaddr: u64, content: &[u8], opts: &EhArgs) -> Result<()> {
     let container = elf.header.container().unwrap_or(Container::Big);
     let sp = SizePrint::new(container);
-    let eh = EhFrame::new(content, LittleEndian); // TODO: endianness
+    // let eh = if elf.little_endian {
+    //     EhFrame::new(content, gimli::LittleEndian) // TODO: endianness
+    // } else {
+    //     EhFrame::new(content, gimli::BigEndian) // TODO: endianness
+    // };
+    let eh = EhFrame::new(content, gimli::LittleEndian); // TODO: endianness
 
     let mut cies = HashMap::new();
     let mut instr_ctx = EhInstrContext {
